@@ -53,8 +53,18 @@
   .spin { width: 34px; height: 34px; border: 4px solid #444; border-top-color: var(--red); border-radius: 50%; animation: spin .8s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  .bar { margin-top: 10px; height: 10px; border: var(--edge); background: var(--card); overflow: hidden; }
-  .bar i { display: block; height: 100%; width: 0; background: var(--red); }
+  .stage { width: 100%; }
+  .stage:fullscreen, .stage:-webkit-full-screen { background: var(--paper); padding: 12px; display: flex; flex-direction: column; justify-content: center; }
+  .stage:fullscreen .screen, .stage:-webkit-full-screen .screen { aspect-ratio: auto; flex: 1; margin-top: 0; }
+  .scrub { position: relative; margin-top: 12px; height: 26px; touch-action: none; cursor: pointer; }
+  .scrub .track { position: absolute; left: 0; right: 0; top: 7px; height: 12px; border: var(--edge); background: var(--card); overflow: hidden; }
+  .scrub .track i { display: block; height: 100%; width: 0; background: var(--red); }
+  .scrub .knob { position: absolute; top: 1px; left: 0; width: 24px; height: 24px; margin-left: -12px; border-radius: 50%; background: var(--card); border: var(--edge); box-shadow: 2px 2px 0 var(--ink); }
+  .scrub.locked { opacity: .45; }
+  .scrub .tip { position: absolute; bottom: 30px; left: 0; transform: translateX(-50%); background: var(--ink); color: var(--paper); font-size: .65rem; font-weight: 700; padding: 3px 6px; display: none; white-space: nowrap; }
+  .scrub.drag .tip { display: block; }
+  .jumps { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; margin-top: 10px; }
+  .jumps .btn { padding: 10px 4px; font-size: .66rem; }
 
   .now { margin-top: 12px; background: var(--card); border: var(--edge); box-shadow: var(--pop); padding: 12px 14px; }
   .nowtop { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -108,6 +118,7 @@
     <button class="tab" data-tab="season">Seasons</button>
   </nav>
 
+  <div class="stage" id="stage">
   <div class="screen" id="screen">
     <video id="vA" playsinline preload="auto"></video>
     <video id="vB" playsinline preload="auto" class="off"></video>
@@ -118,7 +129,17 @@
     </div>
   </div>
 
-  <div class="bar"><i id="bar"></i></div>
+  <div class="scrub locked" id="scrub">
+    <div class="track"><i id="bar"></i></div>
+    <div class="knob" id="knob"></div>
+    <div class="tip" id="tip">0:00</div>
+  </div>
+  <div class="jumps">
+    <button class="btn" id="bStart" disabled>Start Over</button>
+    <button class="btn" id="bBack" disabled>Back 10s</button>
+    <button class="btn" id="bFwd" disabled>Fwd 30s</button>
+  </div>
+  </div>
 
   <section class="now">
     <div class="nowtop">
@@ -139,7 +160,7 @@
 
   <section class="panel" id="pClips">
     <h2>Shuffle Clips</h2>
-    <p>Random episode, random spot, then on to the next one. Tap Full Ep to keep watching the episode you landed on.</p>
+    <p>Random episode, random spot, then on to the next one. Tap Full Ep to watch that episode from the start, or drag the bar to jump anywhere in it.</p>
     <div class="chips" id="lenChips">
       <button class="chip" data-len="15">15 sec</button>
       <button class="chip on" data-len="30">30 sec</button>
@@ -526,7 +547,6 @@ function begin() {
   current = s.ep;
   markPlayed(current);
   slots.forEach((x, i) => { x.v.classList.toggle('off', i !== A); x.v.controls = false; if (i !== A) x.v.pause(); });
-  s.v.controls = mode !== 'clips';
   setNow(current);
   renderList();
   s.v.play().then(onStarted).catch(() => showVeil('tap', 'Tap to keep playing'));
@@ -574,7 +594,7 @@ function startClip() {
   clipTick = setInterval(() => {
     const s = act();
     const played = s.v.currentTime - s.start;
-    $('#bar').style.width = Math.min(100, played / clipLen * 100) + '%';
+    if (!dragging) paintScrub(s.v.currentTime, s.v.duration);
     $('#clock').textContent = fmt(Math.max(0, clipLen - played)) + ' left';
     if (played >= clipLen) {
       clipsPlayed++;
@@ -592,7 +612,7 @@ slots.forEach((slot, i) => {
     if (i !== A || mode === 'clips') return;
     const d = v.duration;
     if (isFinite(d) && d > 0) {
-      $('#bar').style.width = (v.currentTime / d * 100) + '%';
+      if (!dragging) paintScrub(v.currentTime, d);
       $('#clock').textContent = fmt(v.currentTime) + ' / ' + fmt(d);
     }
   });
@@ -643,11 +663,80 @@ function setNow(ep) {
   $('#title').textContent = ep.title;
   $('#sub').textContent = (mode === 'clips' ? 'Clip mode' : mode === 'random' ? 'Random episodes' : seasonOrderShuffle ? 'Season shuffle' : 'Season in order') + '  ·  ' + ep.from;
   $('#clock').textContent = '';
-  $('#bar').style.width = '0%';
+  paintScrub(0, 0);
   $('#bMore').textContent = mode === 'clips' ? 'Full Ep' : 'Screen';
 }
 
-function setButtons(on) { ['#bPause', '#bNext', '#bMore'].forEach(s => { $(s).disabled = !on; }); }
+function setButtons(on) {
+  ['#bPause', '#bNext', '#bMore', '#bStart', '#bBack', '#bFwd'].forEach(s => { $(s).disabled = !on; });
+  $('#scrub').classList.toggle('locked', !on);
+}
+
+/* ============ SCRUBBER ============ */
+let dragging = false;
+function paintScrub(t, d) {
+  const f = isFinite(d) && d > 0 ? Math.min(1, Math.max(0, t / d)) : 0;
+  $('#bar').style.width = (f * 100) + '%';
+  $('#knob').style.left = (f * 100) + '%';
+}
+function scrubFrac(e) {
+  const r = $('#scrub').getBoundingClientRect();
+  return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+}
+function goFull(keepSpot) {
+  if (mode === 'clips') {
+    mode = 'random';
+    stopClip();
+    cancel(stb());
+    setNow(current);
+    setTab('random');
+    preload();
+  }
+  if (!keepSpot) seekActive(0);
+}
+function seekActive(t) {
+  const v = act().v;
+  const d = v.duration;
+  if (!isFinite(d) || d <= 0) return;
+  t = Math.min(Math.max(0, t), d - 1);
+  v.currentTime = t;
+  paintScrub(t, d);
+  if (v.paused) v.play().catch(() => {});
+}
+(function () {
+  const sc = $('#scrub');
+  const tip = $('#tip');
+  const show = e => {
+    const f = scrubFrac(e);
+    const d = act().v.duration;
+    paintScrub(f * d, d);
+    tip.style.left = (f * 100) + '%';
+    tip.textContent = fmt(f * d) + ' / ' + fmt(d);
+    return f;
+  };
+  sc.addEventListener('pointerdown', e => {
+    if (sc.classList.contains('locked') || !started) return;
+    dragging = true;
+    sc.classList.add('drag');
+    try { sc.setPointerCapture(e.pointerId); } catch (x) {}
+    show(e);
+  });
+  sc.addEventListener('pointermove', e => { if (dragging) show(e); });
+  const end = e => {
+    if (!dragging) return;
+    dragging = false;
+    sc.classList.remove('drag');
+    const f = scrubFrac(e);
+    if (mode === 'clips') goFull(true);
+    seekActive(f * act().v.duration);
+  };
+  sc.addEventListener('pointerup', end);
+  sc.addEventListener('pointercancel', () => { dragging = false; sc.classList.remove('drag'); });
+})();
+
+$('#bStart').onclick = () => goFull(false);
+$('#bBack').onclick = () => { if (mode === 'clips') goFull(true); seekActive(act().v.currentTime - 10); };
+$('#bFwd').onclick = () => { if (mode === 'clips') goFull(true); seekActive(act().v.currentTime + 30); };
 
 function renderSeasonChips() {
   const box = $('#seasonChips');
@@ -716,15 +805,9 @@ $('#bPause').onclick = () => { const v = act().v; if (v.paused) v.play().catch((
 $('#bNext').onclick = () => { if (mode === 'clips') { clipsPlayed++; $('#count').textContent = 'Clips played ' + clipsPlayed; } advance(); };
 $('#bMore').onclick = () => {
   if (mode === 'clips') {
-    mode = 'random';
-    stopClip();
-    act().v.controls = true;
-    cancel(stb());
-    setNow(current);
-    setTab('random');
-    preload();
+    goFull(false);
   } else {
-    const el = $('#screen');
+    const el = $('#stage');
     const fs = el.requestFullscreen || el.webkitRequestFullscreen;
     if (fs) fs.call(el);
   }
